@@ -28,9 +28,11 @@ type client struct {
 	ID        uuid.UUID
 	SessionID uuid.UUID
 	Conn      *websocket.Conn
+	heartbeat chan struct{}
 }
 
-func (c client) Disconnect() {
+func (c *client) Disconnect() {
+	close(c.heartbeat)
 	if c.Conn != nil {
 		c.Conn.Close()
 	}
@@ -59,14 +61,13 @@ var (
 	pongWaitDuration   = pingPeriodDuration + time.Second*time.Duration(10)
 )
 
-func (c *client) StartHeartbeat(conn *websocket.Conn) chan struct{} {
+func (c *client) StartHeartbeat(conn *websocket.Conn) {
 	_ = conn.SetReadDeadline(time.Now().Add(pongWaitDuration))
 	conn.SetPongHandler(func(string) error {
 		_ = conn.SetReadDeadline(time.Now().Add(pongWaitDuration))
 		return nil
 	})
 
-	heartbeat := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(pingPeriodDuration)
 		defer ticker.Stop()
@@ -77,16 +78,13 @@ func (c *client) StartHeartbeat(conn *websocket.Conn) chan struct{} {
 				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 					log.Printf("Ping failed for %s: %v", c.ID, err)
 					c.Disconnect()
-					close(heartbeat)
 					return
 				}
-			case <-heartbeat:
+			case <-c.heartbeat:
 				return
 			}
 		}
 	}()
-
-	return heartbeat
 }
 
 var (
@@ -132,10 +130,11 @@ func handleWebsocket(w http.ResponseWriter, req *http.Request) {
 		if !exists {
 			clientLock.Lock()
 			var newClient client = client{
-				ID:   actorID,
-				Conn: conn,
+				ID:        actorID,
+				Conn:      conn,
+				heartbeat: make(chan struct{}),
 			}
-			heartbeat = newClient.StartHeartbeat(conn)
+			newClient.StartHeartbeat(conn)
 			clients[actorID] = newClient
 			clientLock.Unlock()
 			break
@@ -147,7 +146,12 @@ func handleWebsocket(w http.ResponseWriter, req *http.Request) {
 	for {
 		messageType, msg, err := conn.ReadMessage()
 		if err != nil {
-			clients[actorID].Disconnect()
+			clientLock.RLock()
+			client, ok := clients[actorID]
+			clientLock.RUnlock()
+			if ok {
+				client.Disconnect()
+			}
 			close(heartbeat)
 			log.Println("Error reading message:", err)
 			break
