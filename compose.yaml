@@ -18,6 +18,13 @@ services:
     networks:
       - internal_network
 
+  nextjs-frontend:
+    build:
+      context: ./services/nextjs-frontend
+      dockerfile: Dockerfile
+    networks:
+      - internal_network
+
 networks:
   internal_network:
     internal: true
